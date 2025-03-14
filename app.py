@@ -8,7 +8,7 @@ import csv
 import io
 from datetime import datetime
 
-# API Keys (replace with your own keys or use environment variables)
+# API Keys
 GROQ_API_KEY = "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"
 FIRECRAWL_API_KEY = "fc-b07c21a470664f60b606b6538e252284"
 
@@ -62,6 +62,7 @@ def extract_user_info_from_urls(platform_urls: dict, firecrawl_api_key: str) -> 
     """Extract user information from URLs across different platforms using Firecrawl."""
     user_info_list = []
     firecrawl_app = FirecrawlApp(api_key=firecrawl_api_key)
+    unsupported_platforms = set()
     
     platform_prompts = {
         "Quora": "Extract all possible user information from Quora posts, including username, bio (if available), post type (question/answer), timestamp, upvotes, and any links. Focus on content related to management education or the specified query.",
@@ -70,11 +71,17 @@ def extract_user_info_from_urls(platform_urls: dict, firecrawl_api_key: str) -> 
         "Internet": "Extract user information from general web pages (e.g., forums, blogs, educational sites), including author name (if available), content type (article/post), timestamp, and any links. Focus on content related to the specified query."
     }
     
-    try:
-        for platform, urls in platform_urls.items():
-            for url in urls:
-                st.write(f"Processing URL ({platform}): {url}")
-                prompt = platform_prompts.get(platform, "Extract all possible user information, including username, bio (if available), post type, timestamp, upvotes/reactions, and any links. If structured interactions are unavailable, extract the full raw text content of the page and include it as 'raw_text' or 'raw_content'.")
+    for platform, urls in platform_urls.items():
+        if not urls:
+            continue
+        for url in urls:
+            if platform in unsupported_platforms:
+                st.warning(f"Skipping URL {url} on {platform} as it is not supported by Firecrawl.")
+                continue
+                
+            st.write(f"Processing URL ({platform}): {url}")
+            prompt = platform_prompts.get(platform, "Extract all possible user information, including username, bio (if available), post type, timestamp, upvotes/reactions, and any links. If structured interactions are unavailable, extract the full raw text content of the page and include it as 'raw_text' or 'raw_content'.")
+            try:
                 response = firecrawl_app.extract(
                     [url],
                     {
@@ -106,7 +113,7 @@ def extract_user_info_from_urls(platform_urls: dict, firecrawl_api_key: str) -> 
                                 "timestamp": "",
                                 "upvotes": 0,
                                 "links": [],
-                                "raw_text": raw_content[:1000]  # Limit to 1000 chars
+                                "raw_text": raw_content[:1000]
                             }]
                         })
                         st.warning(f"No structured interactions found for {url} on {platform}. Using raw content as fallback.")
@@ -114,8 +121,16 @@ def extract_user_info_from_urls(platform_urls: dict, firecrawl_api_key: str) -> 
                         st.warning(f"No interactions or raw content found for URL: {url} on {platform}")
                 else:
                     st.error(f"Extraction failed for URL: {url} on {platform}. Response: {response}")
-    except Exception as e:
-        st.error(f"Error extracting user info: {e}")
+            except Exception as e:
+                error_msg = str(e)
+                if "This website is no longer supported" in error_msg:
+                    unsupported_platforms.add(platform)
+                    st.error(f"{platform} is not supported by Firecrawl. Please contact help@firecrawl.com to activate it. Skipping remaining URLs for {platform}.")
+                else:
+                    st.error(f"Error extracting user info from {url} on {platform}: {e}")
+    
+    if unsupported_platforms:
+        st.info(f"Platforms skipped due to Firecrawl restrictions: {', '.join(unsupported_platforms)}. Consider using Quora or Internet searches, or contact Firecrawl support.")
     
     return user_info_list
 
@@ -138,7 +153,7 @@ def format_user_info_to_flattened_json(user_info_list: List[dict]) -> List[dict]
                 "Timestamp": interaction.get("timestamp", ""),
                 "Upvotes": interaction.get("upvotes", 0),
                 "Links": ", ".join(interaction.get("links", [])),
-                "Raw Text": interaction.get("raw_text", "")[:500]  # Limit to 500 chars for display
+                "Raw Text": interaction.get("raw_text", "")[:500]
             }
             flattened_data.append(flattened_interaction)
     
@@ -149,11 +164,9 @@ def generate_csv(flattened_data):
     output = io.StringIO()
     writer = csv.writer(output)
     
-    # Define headers
     headers = ["Platform", "Website URL", "Username", "Bio", "Post Type", "Timestamp", "Upvotes", "Links", "Raw Text"]
     writer.writerow(headers)
     
-    # Write each data row
     for item in flattened_data:
         row = [
             item.get("Platform", ""),
@@ -164,7 +177,7 @@ def generate_csv(flattened_data):
             item.get("Timestamp", ""),
             str(item.get("Upvotes", 0)),
             item.get("Links", ""),
-            item.get("Raw Text", "")[:1000]  # Limit to 1000 chars for CSV
+            item.get("Raw Text", "")[:1000]
         ]
         writer.writerow(row)
     
@@ -253,11 +266,9 @@ def main():
                     flattened_data = format_user_info_to_flattened_json(user_info_list)
                 
                 if flattened_data:
-                    # Preview the first few rows
                     st.subheader("Preview of Extracted Data (First 5 rows)")
                     st.dataframe(flattened_data[:5])
                     
-                    # Generate CSV with timestamp for uniqueness
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     csv_data = generate_csv(flattened_data)
                     st.download_button(
