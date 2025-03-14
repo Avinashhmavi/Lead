@@ -9,6 +9,7 @@ import io
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import time
 
 # API Keys
 GROQ_API_KEY = "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"
@@ -64,81 +65,94 @@ def search_for_urls(company_description: str, firecrawl_api_key: str, num_links:
     
     return platform_urls
 
-def extract_single_url(url: str, platform: str, firecrawl_app: FirecrawlApp, prompt: str, unsupported_platforms: set) -> Tuple[str, str, Optional[dict]]:
-    """Extract user info from a single URL (used for parallel processing)."""
+def extract_single_url(url: str, platform: str, firecrawl_app: FirecrawlApp, prompt: str, unsupported_platforms: set, max_retries: int = 2) -> Tuple[str, str, Optional[dict]]:
+    """Extract user info from a single URL with retries and JavaScript rendering."""
     if platform in unsupported_platforms:
         return url, platform, None
     
-    try:
-        response = firecrawl_app.extract(
-            [url],
-            {
-                'prompt': prompt,
-                'schema': PageSchema.model_json_schema(),
-            },
-            timeout=10  # Add a 10-second timeout
-        )
-        
-        if response.get('success') and response.get('status') == 'completed':
-            data = response.get('data', {})
-            interactions = data.get('interactions', [])
-            raw_content = data.get('raw_content')
+    for attempt in range(max_retries + 1):
+        try:
+            response = firecrawl_app.extract(
+                [url],
+                {
+                    'prompt': prompt,
+                    'schema': PageSchema.model_json_schema(),
+                    'options': {'render_js': True, 'timeout': 10}  # Enable JavaScript rendering
+                }
+            )
             
-            if interactions:
-                return url, platform, {
-                    "platform": platform,
-                    "website_url": url,
-                    "user_info": interactions
-                }
-            elif raw_content:
-                return url, platform, {
-                    "platform": platform,
-                    "website_url": url,
-                    "user_info": [{
-                        "username": "Unknown",
-                        "bio": "",
-                        "post_type": "post",
-                        "timestamp": "",
-                        "upvotes": 0,
-                        "links": [],
-                        "raw_text": raw_content[:1000]
-                    }]
-                }
+            if response.get('success') and response.get('status') == 'completed':
+                data = response.get('data', {})
+                raw_content = data.get('raw_content')
+                interactions = data.get('interactions', [])
+                
+                if raw_content or interactions:
+                    result = {}
+                    if interactions:
+                        result = {
+                            "platform": platform,
+                            "website_url": url,
+                            "user_info": interactions
+                        }
+                    elif raw_content:
+                        result = {
+                            "platform": platform,
+                            "website_url": url,
+                            "user_info": [{
+                                "username": "Unknown",
+                                "bio": "",
+                                "post_type": "post",
+                                "timestamp": "",
+                                "upvotes": 0,
+                                "links": [],
+                                "raw_text": raw_content[:1000]
+                            }]
+                        }
+                    return url, platform, result
+                else:
+                    return url, platform, None
+            else:
+                st.write(f"Attempt {attempt + 1} failed for {url} on {platform}: {response}")
+                if attempt < max_retries:
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    return url, platform, None
+        except Exception as e:
+            error_msg = str(e)
+            if "This website is no longer supported" in error_msg:
+                with user_info_lock:
+                    unsupported_platforms.add(platform)
+                return url, platform, None
+            st.error(f"Error extracting from {url} on {platform} (Attempt {attempt + 1}): {e}")
+            if attempt < max_retries:
+                time.sleep(2 ** attempt)
             else:
                 return url, platform, None
-        else:
-            return url, platform, None
-    except Exception as e:
-        error_msg = str(e)
-        if "This website is no longer supported" in error_msg:
-            with user_info_lock:
-                unsupported_platforms.add(platform)
-        return url, platform, None
+    
+    return url, platform, None
 
 def extract_user_info_from_urls(platform_urls: dict, firecrawl_api_key: str) -> List[dict]:
     """Extract user information from URLs across different platforms using Firecrawl with parallel processing."""
     global user_info_list
-    user_info_list = []  # Reset the global list
+    user_info_list = []
     unsupported_platforms = set()
     firecrawl_app = FirecrawlApp(api_key=firecrawl_api_key)
     
     platform_prompts = {
-        "Quora": "Extract all possible user information from Quora posts, including username, bio (if available), post type (question/answer), timestamp, upvotes, and any links. Focus on content related to management education or the specified query.",
-        "Reddit": "Extract user information from Reddit posts, including username, post type (post/comment), timestamp, upvotes, and any links. Focus on discussions related to the specified query.",
-        "LinkedIn": "Extract user information from LinkedIn posts or profiles, including username, bio (if available), post type (post/comment), timestamp, reactions, and any links. Focus on professional content related to the specified query.",
-        "Internet": "Extract user information from general web pages (e.g., forums, blogs, educational sites), including authorブル: author name (if available), content type (article/post), timestamp, and any links. Focus on content related to the specified query."
+        "Quora": "Extract all possible user information from Quora posts, including username, bio, post type (question/answer), timestamp, upvotes, and any links. Focus on content related to management education or the specified query. Prioritize raw content if structured data is unavailable.",
+        "Reddit": "Extract user information from Reddit posts, including username, post type (post/comment), timestamp, upvotes, and any links. Focus on discussions related to the specified query. Prioritize raw content if structured data is unavailable.",
+        "LinkedIn": "Extract user information from LinkedIn posts or profiles, including username, bio, post type (post/comment), timestamp, reactions, and any links. Focus on professional content related to the specified query. Prioritize raw content if structured data is unavailable.",
+        "Internet": "Extract user information from general web pages (e.g., forums, blogs, educational sites), including author name, content type (article/post), timestamp, and any links. Focus on content related to the specified query. Prioritize raw content if structured data is unavailable."
     }
     
-    # Prepare tasks for parallel processing
     tasks = []
     for platform, urls in platform_urls.items():
         if not urls:
             continue
-        prompt = platform_prompts.get(platform, "Extract all possible user information, including username, bio (if available), post type, timestamp, upvotes/reactions, and any links. If structured interactions are unavailable, extract the full raw text content of the page and include it as 'raw_text' or 'raw_content'.")
+        prompt = platform_prompts.get(platform, "Extract all possible user information, including username, bio, post type, timestamp, upvotes/reactions, and any links. Prioritize raw content if structured data is unavailable.")
         for url in urls:
             tasks.append((url, platform, prompt))
     
-    # Parallel processing with ThreadPoolExecutor
     total_tasks = len(tasks)
     if total_tasks == 0:
         return []
@@ -147,36 +161,27 @@ def extract_user_info_from_urls(platform_urls: dict, firecrawl_api_key: str) -> 
     progress_bar = st.progress(0)
     completed_tasks = 0
     
-    with ThreadPoolExecutor(max_workers=5) as executor:  # Adjust max_workers based on your system
+    with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_url = {executor.submit(extract_single_url, url, platform, firecrawl_app, prompt, unsupported_platforms): (url, platform) for url, platform, prompt in tasks}
         
         for future in as_completed(future_to_url):
             url, platform = future_to_url[future]
             result = future.result()
             
-            # Update progress
             completed_tasks += 1
             progress_bar.progress(completed_tasks / total_tasks)
             
-            # Log results
-            st.write(f"Processed URL ({platform}): {url}")
-            if result[2] is None:
-                if platform in unsupported_platforms:
-                    st.warning(f"Skipping URL {url} on {platform} as it is not supported by Firecrawl.")
-                else:
-                    st.warning(f"No interactions or raw content found for URL: {url} on {platform}")
-            else:
-                st.write(f"Extracted data from {url} on {platform}")
-                if result[2]["user_info"][0].get("raw_text"):
-                    st.warning(f"No structured interactions found for {url} on {platform}. Using raw content as fallback.")
-            
-            # Safely append to user_info_list
             if result[2]:
                 with user_info_lock:
                     user_info_list.append(result[2])
+                st.write(f"Successfully extracted data from {url} on {platform}")
+            elif platform in unsupported_platforms:
+                st.warning(f"Skipping {url} on {platform} due to Firecrawl restrictions.")
+            else:
+                st.warning(f"No data extracted from {url} on {platform}")
     
     if unsupported_platforms:
-        st.info(f"Platforms skipped due to Firecrawl restrictions: {', '.join(unsupported_platforms)}. Consider using Quora or Internet searches, or contact Firecrawl support at help@firecrawl.com.")
+        st.info(f"Platforms skipped due to Firecrawl restrictions: {', '.join(unsupported_platforms)}. Contact help@firecrawl.com for support.")
     
     return user_info_list
 
@@ -325,7 +330,7 @@ def main():
                     )
                     st.success("Lead generation completed successfully! Click the button above to download the CSV file.")
                 else:
-                    st.error("No valid user data found to export. Check the logs above for details.")
+                    st.error("No valid user data found to export. Check the logs above for details. This may be due to Firecrawl restrictions or website protections.")
             else:
                 st.warning("No relevant URLs found across selected platforms.")
 
