@@ -1,16 +1,16 @@
 import streamlit as st
 import requests
-from groq import Groq  # Using official Groq SDK
+from groq import Groq
 from firecrawl import FirecrawlApp
 from pydantic import BaseModel, Field
 from typing import List
-from composio_phidata import Action, ComposioToolSet
-import json
+import csv
+import io
+from datetime import datetime
 
 # API Keys (replace with your own keys or use environment variables)
 GROQ_API_KEY = "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"
 FIRECRAWL_API_KEY = "fc-b07c21a470664f60b606b6538e252284"
-COMPOSIO_API_KEY = "nzubiyr1r2k8jq4gobm1rj"
 
 class QuoraUserInteractionSchema(BaseModel):
     username: str = Field(description="The username of the user who posted the question or answer")
@@ -95,64 +95,29 @@ def format_user_info_to_flattened_json(user_info_list: List[dict]) -> List[dict]
     
     return flattened_data
 
-def write_to_google_sheets(flattened_data: List[dict], composio_api_key: str) -> str | None:
-    """
-    Creates a new Google Sheet using the Composio toolset and returns its link.
-
-    Args:
-        flattened_data (List[dict]): The data to write to the Google Sheet.
-        composio_api_key (str): The API key for Composio.
-
-    Returns:
-        str | None: The Google Sheets link if successful, None if failed.
-    """
-    # Initialize Composio toolset
-    composio_toolset = ComposioToolSet(api_key=composio_api_key)
-    sheet_tool = composio_toolset.get_tools(actions=[Action.GOOGLESHEETS_SHEET_FROM_JSON])[0]
-
-    # Prepare JSON data for the sheet
-    sheet_data = {
-        "title": "Lead_Generation_Results",
-        "sheets": [
-            {
-                "name": "Sheet1",
-                "rows": [
-                    ["Website URL", "Username", "Bio", "Post Type", "Timestamp", "Upvotes", "Links"]
-                ] + [
-                    [
-                        item.get("Website URL", ""),
-                        item.get("Username", ""),
-                        item.get("Bio", ""),
-                        item.get("Post Type", ""),
-                        item.get("Timestamp", ""),
-                        str(item.get("Upvotes", 0)),  # Ensure string for consistency
-                        item.get("Links", "")
-                    ]
-                    for item in flattened_data
-                ]
-            }
+def generate_csv(flattened_data):
+    """Generate CSV data from flattened_data for download."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Define headers
+    headers = ["Website URL", "Username", "Bio", "Post Type", "Timestamp", "Upvotes", "Links"]
+    writer.writerow(headers)
+    
+    # Write each data row
+    for item in flattened_data:
+        row = [
+            item.get("Website URL", ""),
+            item.get("Username", ""),
+            item.get("Bio", ""),
+            item.get("Post Type", ""),
+            item.get("Timestamp", ""),
+            str(item.get("Upvotes", 0)),  # Ensure Upvotes is a string
+            item.get("Links", "")
         ]
-    }
-
-    try:
-        # Execute the Composio tool with the JSON data
-        response = sheet_tool.run({"json_data": json.dumps(sheet_data)})
-
-        # Check if the action succeeded and extract the spreadsheet ID
-        if response.get("success"):
-            spreadsheet_id = response.get("spreadsheet_id")
-            if spreadsheet_id:
-                return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
-            else:
-                print("Error: No spreadsheet_id returned in response.")
-                return None
-        else:
-            print(f"Error creating sheet: {response.get('error', 'Unknown error')}")
-            return None
-
-    except Exception as e:
-        print(f"Error writing to Google Sheets: {e}")
-        return None
+        writer.writerow(row)
+    
+    return output.getvalue()
 
 def transform_prompt(user_query: str, groq_api_key: str) -> str:
     """Transform user query into a concise company description using Groq."""
@@ -193,8 +158,6 @@ def main():
         st.header("Configuration")
         firecrawl_api_key = FIRECRAWL_API_KEY
         groq_api_key = GROQ_API_KEY
-        composio_api_key = COMPOSIO_API_KEY
-        
         num_links = st.number_input("Number of links to search", min_value=1, max_value=10, value=3)
         
         if st.button("Reset"):
@@ -208,7 +171,7 @@ def main():
     )
 
     if st.button("Generate Leads"):
-        if not all([firecrawl_api_key, groq_api_key, composio_api_key, user_query]):
+        if not all([firecrawl_api_key, groq_api_key, user_query]):
             st.error("Please fill in all the API keys and describe what leads you're looking for.")
         else:
             with st.spinner("Processing your query..."):
@@ -229,15 +192,23 @@ def main():
                 with st.spinner("Formatting user info..."):
                     flattened_data = format_user_info_to_flattened_json(user_info_list)
                 
-                with st.spinner("Writing to Google Sheets..."):
-                    google_sheets_link = write_to_google_sheets(flattened_data, composio_api_key)
-                
-                if google_sheets_link:
-                    st.success("Lead generation and data writing to Google Sheets completed successfully!")
-                    st.subheader("Google Sheets Link:")
-                    st.markdown(f"[View Google Sheet]({google_sheets_link})")
+                if flattened_data:
+                    # Preview the first few rows
+                    st.subheader("Preview of Extracted Data (First 5 rows)")
+                    st.dataframe(flattened_data[:5])
+                    
+                    # Generate CSV with timestamp for uniqueness
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    csv_data = generate_csv(flattened_data)
+                    st.download_button(
+                        label="Download CSV",
+                        data=csv_data,
+                        file_name=f"lead_generation_{timestamp}.csv",
+                        mime="text/csv"
+                    )
+                    st.success("Lead generation completed successfully! Click the button above to download the CSV file.")
                 else:
-                    st.error("Failed to retrieve the Google Sheets link.")
+                    st.warning("No data found to export.")
             else:
                 st.warning("No relevant URLs found.")
 
