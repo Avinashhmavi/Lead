@@ -8,9 +8,9 @@ from composio_phidata import Action, ComposioToolSet
 import json
 
 # API Keys (replace with your own keys or use environment variables)
-GROQ_API_KEY = "your_groq_api_key_here"
-FIRECRAWL_API_KEY = "your_firecrawl_api_key_here"
-COMPOSIO_API_KEY = "your_composio_api_key_here"
+GROQ_API_KEY = "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"
+FIRECRAWL_API_KEY = "fc-b07c21a470664f60b606b6538e252284"
+COMPOSIO_API_KEY = "nzubiyr1r2k8jq4gobm1rj"
 
 class QuoraUserInteractionSchema(BaseModel):
     username: str = Field(description="The username of the user who posted the question or answer")
